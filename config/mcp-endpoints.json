@@ -1,0 +1,26 @@
+[
+  {
+    "name": "serena",
+    "displayName": "Serena Coding Assistant",
+    "endpoint": "http://mcp-serena:9121/mcp",
+    "health": "http://mcp-serena:9121/mcp",
+    "capabilities": ["code-completion", "planning", "refactoring"],
+    "transport": "streamable-http"
+  },
+  {
+    "name": "redis-tools",
+    "displayName": "Redis MCP Tools",
+    "endpoint": "http://mcp-redis:8000/mcp",
+    "health": "http://mcp-redis:8000/mcp",
+    "capabilities": ["redis-cli", "key-introspection", "search"],
+    "transport": "http"
+  },
+  {
+    "name": "context7",
+    "displayName": "Context7 Code Search",
+    "endpoint": "http://context7-mcp:7070/mcp",
+    "health": "http://context7-mcp:7070/health",
+    "capabilities": ["code-search", "rag", "docs"],
+    "transport": "http"
+  }
+]

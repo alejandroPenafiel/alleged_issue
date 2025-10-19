@@ -1,0 +1,147 @@
+version: '3.9'
+
+x-healthcheck-curl: &healthcheck_curl
+  interval: 30s
+  timeout: 10s
+  retries: 5
+  start_period: 15s
+
+services:
+  python-engine:
+    build: ./python-engine
+    container_name: python_engine
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    environment:
+      REDIS_URL: redis://redis:6379/0
+      CELERY_BROKER_URL: redis://redis:6379/0
+      CELERY_RESULT_BACKEND: redis://redis:6379/0
+      DATABASE_URL: postgresql://postgres:postgres@postgres:5432/appdb
+      WEBSOCKET_URL: ${WEBSOCKET_URL:-ws://host.docker.internal:8765/stream}
+      MCP_ENDPOINTS_FILE: /mcp/endpoints.json
+    command: ["python", "engine.py"]
+    volumes:
+      - ./config/mcp-endpoints.json:/mcp/endpoints.json:ro
+    healthcheck:
+      test: ["CMD-SHELL", "python - <<'PY'\nimport os\nfrom redis import Redis\nurl = os.environ.get('REDIS_URL', 'redis://redis:6379/0')\nRedis.from_url(url).ping()\nPY"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  eliza:
+    build: ./eliza
+    container_name: elizaos
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    environment:
+      ELIZA_DATABASE_URL: postgresql://postgres:postgres@postgres:5432/eliza_db
+      ELIZA_REDIS_HOST: redis
+      ELIZA_REDIS_PORT: 6379
+      MCP_ENDPOINTS_FILE: /mcp/endpoints.json
+      ELIZA_TOOL_AUTO_REGISTRATION: "true"
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./config/mcp-endpoints.json:/mcp/endpoints.json:ro
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/api/health"]
+      <<: *healthcheck_curl
+
+  redis:
+    image: redis:7-alpine
+    container_name: redis
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  postgres:
+    image: postgres:15-alpine
+    container_name: postgres
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: appdb
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  mcp-serena:
+    image: ghcr.io/oraios/serena:latest
+    container_name: mcp_serena
+    command: ["serena", "start-mcp-server", "--transport", "streamable-http", "--port", "9121"]
+    environment:
+      SERENA_DOCKER: "1"
+      MCP_REGISTRATION_FILE: /mcp/endpoints.json
+    ports:
+      - "9121:9121"
+    volumes:
+      - mcp_cache:/root/.serena
+      - ./config/mcp-endpoints.json:/mcp/endpoints.json
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9121/mcp"]
+      <<: *healthcheck_curl
+
+  mcp-redis:
+    image: ghcr.io/redis/mcp-redis:latest
+    container_name: mcp_redis
+    environment:
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      MCP_REGISTRATION_FILE: /mcp/endpoints.json
+    depends_on:
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./config/mcp-endpoints.json:/mcp/endpoints.json
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/mcp"]
+      <<: *healthcheck_curl
+
+  context7-mcp:
+    build: ./context7
+    container_name: context7_mcp
+    command: ["context7-mcp", "--transport", "http", "--port", "7070", "--host", "0.0.0.0"]
+    ports:
+      - "7070:7070"
+    volumes:
+      - ./config/mcp-endpoints.json:/mcp/endpoints.json
+      - ./shared/context7:/workspace:ro
+    environment:
+      CONTEXT7_PROJECT_DIR: /workspace
+      MCP_REGISTRATION_FILE: /mcp/endpoints.json
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:7070/mcp"]
+      <<: *healthcheck_curl
+
+  eliza-tool-registrar:
+    build: ./tooling/registrar
+    container_name: eliza_tool_registrar
+    depends_on:
+      eliza:
+        condition: service_healthy
+    environment:
+      ELIZA_API_URL: http://eliza:3000/api/tools
+      MCP_ENDPOINTS_FILE: /mcp/endpoints.json
+    volumes:
+      - ./config/mcp-endpoints.json:/mcp/endpoints.json:ro
+    restart: "no"
+
+volumes:
+  redis_data:
+  postgres_data:
+  mcp_cache:
