@@ -1,0 +1,139 @@
+version: "3.9"
+
+x-mcp-service: &mcp-service
+  restart: unless-stopped
+  networks:
+    - agent-mesh
+
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: redis
+    command: ["redis-server", "--appendonly", "yes"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    volumes:
+      - redis_data:/data
+    networks:
+      - agent-mesh
+
+  postgres:
+    image: postgres:15-alpine
+    container_name: postgres
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: appdb
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - agent-mesh
+
+  python-engine:
+    build: ./python-engine
+    container_name: python_engine
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    environment:
+      REDIS_URL: redis://redis:6379/0
+      CELERY_BROKER_URL: redis://redis:6379/0
+      CELERY_RESULT_BACKEND: redis://redis:6379/1
+      DATABASE_URL: postgresql://postgres:postgres@postgres:5432/appdb
+      ENGINE_WEBSOCKET_URL: ${ENGINE_WEBSOCKET_URL:-ws://example.com/stream}
+      ENGINE_CHANNEL: engine:events
+    healthcheck:
+      test: ["CMD", "python", "healthcheck.py"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    networks:
+      - agent-mesh
+
+  eliza:
+    build: ./eliza
+    container_name: elizaos
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      mcp-serena:
+        condition: service_healthy
+      mcp-redis:
+        condition: service_started
+      context7-mcp:
+        condition: service_started
+    environment:
+      ELIZA_DATABASE_URL: postgresql://postgres:postgres@postgres:5432/eliza_db
+      ELIZA_REDIS_HOST: redis
+      ELIZA_REDIS_PORT: "6379"
+      MCP_ENDPOINTS: |
+        [
+          {"name": "serena", "url": "http://mcp-serena:9121/mcp"},
+          {"name": "redis", "url": "http://mcp-redis:8000/mcp"},
+          {"name": "context7", "url": "http://context7-mcp:7070/mcp"}
+        ]
+      MCP_REGISTRY_PATH: /app/config/mcp-registry.json
+    ports:
+      - "3000:3000"
+    volumes:
+      - eliza_state:/app/.eliza
+    networks:
+      - agent-mesh
+
+  mcp-serena:
+    image: ghcr.io/oraios/serena:latest
+    container_name: mcp_serena
+    command: ["serena", "start-mcp-server", "--transport", "streamable-http", "--port", "9121"]
+    <<: *mcp-service
+    ports:
+      - "9121:9121"
+    volumes:
+      - serena_cache:/root/.serena
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:9121/mcp"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  mcp-redis:
+    image: ghcr.io/redis/mcp-redis:latest
+    container_name: mcp_redis
+    environment:
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+    depends_on:
+      redis:
+        condition: service_healthy
+    <<: *mcp-service
+
+  context7-mcp:
+    build: ./context7
+    container_name: context7_mcp
+    command: ["context7-mcp", "--transport", "http", "--port", "7070"]
+    volumes:
+      - ./project-data:/project:ro
+    ports:
+      - "7070:7070"
+    <<: *mcp-service
+
+networks:
+  agent-mesh:
+    driver: bridge
+
+volumes:
+  redis_data:
+  postgres_data:
+  serena_cache:
+  eliza_state:
