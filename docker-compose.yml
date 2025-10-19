@@ -1,0 +1,198 @@
+version: "3.9"
+
+x-healthcheck-defaults: &healthcheck_defaults
+  interval: 30s
+  timeout: 5s
+  retries: 5
+  start_period: 15s
+
+x-common-env: &common_env
+  REDIS_HOST: redis
+  REDIS_PORT: 6379
+  POSTGRES_HOST: postgres
+  POSTGRES_PORT: 5432
+
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: redis
+    command: ["redis-server", "--appendonly", "yes", "--save", "60", "1"]
+    restart: unless-stopped
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      <<: *healthcheck_defaults
+
+  postgres:
+    image: postgres:15-alpine
+    container_name: postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: appdb
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "postgres"]
+      <<: *healthcheck_defaults
+
+  python-engine:
+    build: ./python-engine
+    container_name: python_engine
+    restart: unless-stopped
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    environment:
+      <<: *common_env
+      REDIS_URL: redis://redis:6379/0
+      CELERY_BROKER_URL: redis://redis:6379/1
+      CELERY_RESULT_BACKEND: redis://redis:6379/2
+      DATABASE_URL: postgresql://postgres:postgres@postgres:5432/appdb
+      WEBSOCKET_URL: ${WEBSOCKET_URL:-wss://echo.websocket.events}
+      ENGINE_PUBSUB_CHANNEL: engine.events
+      ENGINE_TASK_QUEUE: engine.tasks
+    volumes:
+      - ./python-engine:/app
+    command: ["python", "engine.py"]
+    healthcheck:
+      test: ["CMD-SHELL", "python -c 'import redis, os; redis.Redis.from_url(os.environ.get(\"REDIS_URL\")).ping()'"]
+      <<: *healthcheck_defaults
+
+  python-worker:
+    build: ./python-engine
+    container_name: python_worker
+    restart: unless-stopped
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    environment:
+      <<: *common_env
+      REDIS_URL: redis://redis:6379/0
+      CELERY_BROKER_URL: redis://redis:6379/1
+      CELERY_RESULT_BACKEND: redis://redis:6379/2
+      DATABASE_URL: postgresql://postgres:postgres@postgres:5432/appdb
+      ENGINE_TASK_QUEUE: engine.tasks
+    volumes:
+      - ./python-engine:/app
+    command: ["celery", "-A", "celery_app.celery_app", "worker", "--loglevel=INFO", "-Q", "engine.tasks"]
+
+  eliza:
+    build: ./eliza
+    container_name: elizaos
+    restart: unless-stopped
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    environment:
+      <<: *common_env
+      ELIZA_DATABASE_URL: postgresql://postgres:postgres@postgres:5432/eliza_db
+      ELIZA_REDIS_URL: redis://redis:6379/3
+      MCP_SERVICE_REGISTRY: http://registry:8500/registry.json
+    ports:
+      - "3000:3000"
+    volumes:
+      - eliza_cache:/app/.cache
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:3000/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 45s
+
+  mcp-serena:
+    image: ghcr.io/oraios/serena:latest
+    container_name: mcp_serena
+    restart: unless-stopped
+    command: ["serena", "start-mcp-server", "--transport", "streamable-http", "--port", "9121"]
+    depends_on:
+      redis:
+        condition: service_healthy
+    environment:
+      SERENA_DOCKER: "1"
+    ports:
+      - "9121:9121"
+    volumes:
+      - serena_cache:/root/.serena
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:9121/mcp"]
+      <<: *healthcheck_defaults
+
+  mcp-redis:
+    image: mcp/redis:latest
+    container_name: mcp_redis
+    restart: unless-stopped
+    depends_on:
+      redis:
+        condition: service_healthy
+    environment:
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8000/mcp || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    ports:
+      - "8010:8000"
+    volumes:
+      - mcp_redis_cache:/app/.cache
+
+  context7-mcp:
+    build: ./context7
+    container_name: context7_mcp
+    restart: unless-stopped
+    command: ["context7-mcp", "--transport", "http", "--port", "7070", "--project", "/workspace"]
+    depends_on:
+      redis:
+        condition: service_started
+    ports:
+      - "7070:7070"
+    volumes:
+      - ./:/workspace:ro
+      - context7_cache:/root/.context7
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:7070/mcp"]
+      <<: *healthcheck_defaults
+
+  registry:
+    build: ./scripts
+    container_name: mcp_registry
+    restart: unless-stopped
+    depends_on:
+      mcp-serena:
+        condition: service_healthy
+      mcp-redis:
+        condition: service_started
+      context7-mcp:
+        condition: service_started
+    environment:
+      REGISTRY_OUTPUT: /data/registry.json
+      MCP_TARGETS: >-
+        serena=http://mcp-serena:9121/mcp,
+        redis=http://mcp-redis:8000/mcp,
+        context7=http://context7-mcp:7070/mcp
+    volumes:
+      - registry_data:/data
+    ports:
+      - "8500:8500"
+    healthcheck:
+      test: ["CMD", "python", "registry.py", "--check"]
+      <<: *healthcheck_defaults
+
+volumes:
+  redis_data:
+  postgres_data:
+  serena_cache:
+  mcp_redis_cache:
+  context7_cache:
+  eliza_cache:
+  registry_data:
