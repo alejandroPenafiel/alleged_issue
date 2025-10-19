@@ -1,0 +1,136 @@
+version: '3.9'
+
+x-healthcheck-defaults: &health_defaults
+  interval: 15s
+  timeout: 5s
+  retries: 5
+  start_period: 10s
+
+x-shared-environment: &shared_env
+  REDIS_URL: redis://redis:6379/0
+  CELERY_BROKER_URL: redis://redis:6379/0
+  CELERY_RESULT_BACKEND: redis://redis:6379/0
+  POSTGRES_HOST: postgres
+  POSTGRES_DB: appdb
+  POSTGRES_USER: postgres
+  POSTGRES_PASSWORD: postgres
+
+services:
+  python-engine:
+    build: ./python-engine
+    container_name: python_engine
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    environment:
+      <<: *shared_env
+      DATA_FEED_URL: ${DATA_FEED_URL:-ws://example.com/feed}
+      TOOL_REGISTRY_PATH: /app/config/mcp_endpoints.yml
+    volumes:
+      - ./python-engine/config:/app/config:ro
+    command: ["python", "engine.py"]
+    healthcheck:
+      test: ["CMD-SHELL", "python healthcheck.py"]
+      <<: *health_defaults
+
+  eliza:
+    build: ./eliza
+    container_name: elizaos
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    environment:
+      ELIZA_DATABASE_URL: postgresql://postgres:postgres@postgres:5432/eliza_db
+      ELIZA_REDIS_HOST: redis
+      ELIZA_REDIS_PORT: 6379
+      MCP_REGISTRY_PATH: /app/config/mcp_endpoints.yml
+    volumes:
+      - ./eliza/config:/app/config:ro
+      - mcp_shared_cache:/app/.cache
+    ports:
+      - "3000:3000"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/api/health"]
+      <<: *health_defaults
+      start_period: 30s
+
+  redis:
+    image: redis:7-alpine
+    container_name: redis
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      <<: *health_defaults
+
+  postgres:
+    image: postgres:15-alpine
+    container_name: postgres
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: appdb
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "postgres"]
+      <<: *health_defaults
+
+  mcp-serena:
+    image: ghcr.io/oraios/serena:latest
+    container_name: mcp_serena
+    command: ["serena", "start-mcp-server", "--transport", "streamable-http", "--port", "9121"]
+    volumes:
+      - mcp_serena_cache:/root/.serena
+    environment:
+      SERENA_DOCKER: "1"
+    ports:
+      - "9121:9121"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9121/mcp"]
+      <<: *health_defaults
+
+  mcp-redis:
+    image: mcp/redis:latest
+    container_name: mcp_redis
+    environment:
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+    depends_on:
+      redis:
+        condition: service_started
+    volumes:
+      - mcp_shared_cache:/app/.cache
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      <<: *health_defaults
+
+  context7-mcp:
+    build: ./context7
+    container_name: context7_mcp
+    command: ["context7-mcp", "--transport", "http", "--port", "7070", "--host", "0.0.0.0"]
+    depends_on:
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./context7/workspace:/workspace:rw
+      - type: bind
+        source: ${CONTEXT7_PROJECT_ROOT:-.}
+        target: /workspace/project
+        read_only: true
+    ports:
+      - "7070:7070"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:7070/mcp"]
+      <<: *health_defaults
+
+volumes:
+  redis_data:
+  postgres_data:
+  mcp_serena_cache:
+  mcp_shared_cache:
