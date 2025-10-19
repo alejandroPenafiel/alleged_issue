@@ -1,0 +1,10 @@
+tools:
+  - name: serena
+    endpoint: http://mcp-serena:9121
+    transport: streamable-http
+  - name: redis-explorer
+    endpoint: http://mcp-redis:8080
+    transport: http
+  - name: context7
+    endpoint: http://context7-mcp:7070
+    transport: http

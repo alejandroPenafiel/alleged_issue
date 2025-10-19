@@ -1,0 +1,5 @@
+celery==5.3.6
+redis[hiredis]==5.0.1
+websockets==11.0.3
+httpx==0.26.0
+pyyaml==6.0.1
